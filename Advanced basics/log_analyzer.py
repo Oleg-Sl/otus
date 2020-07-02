@@ -6,10 +6,11 @@ import sys
 import os
 import re
 import gzip
-import datetime
 import logging
+import argparse
 
-from collections import namedtuple
+from datetime import datetime
+from collections import namedtuple, defaultdict
 from string import Template
 
 
@@ -17,119 +18,102 @@ config = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
     "LOG_DIR": "./log",
-    "LOG_DIR_CURRENT_SCRIPT": "./log_log_analyzer",
-    "PERCENT_ERRORS": 1
+    "LOG_DIR_CURRENT_SCRIPT": None,
+    "LOG_LEVEL": "INFO",
+    "PERCENT_ERRORS": 1,
+    "PATTERN_NAME_LOG": "^(nginx-access-ui.log-)(?P<date>\d{8})(\.gz)?$",
+    "TEMPLATE": "report.html",
+    "PATTERN_RECORD_LOG": "\"(GET|POST|HEAD|PUT) (?P<url>\S+) \S+\".+ (?P<time>\d+\.\d+)$"
+
 }
 
 
-def read_param_command_line():
-    """
-    Чтение аргументов командной строки, получениие пути к файлу конфигурации.
-    :return: 'str' or None - если путь передан возвращается этот путь, если нет - None
-    """
-    args = sys.argv.__iter__()
-    for arg in args:
-        if arg == '--config':
-            try:
-                path = args.__next__()
-                log.info(f'Параметры команлной строки path_config = {path}')
-                return path
-            except StopIteration:
-                log.exception(f'Параметры команлной строки не переданы или некорректны')
-                return
-
-
-def read_conf(path, conf_dict):
+def read_conf(path, config):
     """
     Чтение файла конфигурации и перезапиь дефолтной конфигурации
     :param path: путь к файлу конфигурации
-    :param conf_dict: дефолтный конфиг
-    :return: True - если фаил конфигурации существует, False - если не существует
+    :param config: дефолтный конфиг
+    :return: config - фаил конфигурации
     """
-    log = logging.getLogger('app.log')
-    if not os.path.exists(os.path.join(path, 'config.conf')):
-        return False
-    with open(os.path.join(path, os.listdir(path)[0]), 'r') as f:
-        while True:
-            d = f.readline().split(':')
-            if not d[0]:
-                break
-            if d[0] == 'REPORT_SIZE':
+    if os.path.isdir(path):
+        file_config = os.path.join(path, 'config.conf')
+    else:
+        file_config = path
+
+    if not os.path.exists(file_config):
+        return config
+
+    with open(file_config, 'r') as f:
+        for line in f:
+            try:
+                key, value = line.split(':')
+            except ValueError:
+                pass
+
+            if key == 'REPORT_SIZE':
                 try:
-                    conf_dict['REPORT_SIZE'] = int(d[1])
+                    config['REPORT_SIZE'] = int(value)
                 except ValueError:
                     pass
-            elif d[0] == 'REPORT_DIR':
-                conf_dict['REPORT_DIR'] = d[1].strip()
-            elif d[0] == 'LOG_DIR':
-                conf_dict['LOG_DIR'] = d[1].strip()
-    log.info(f'Слияние конфига из файла и дефолтного конфига выполнено: {config}')
-    return True
+            elif key == 'REPORT_DIR':
+                config['REPORT_DIR'] = value.strip()
+            elif key == 'LOG_DIR':
+                config['LOG_DIR'] = value.strip()
+            elif key == 'LOG_DIR_CURRENT_SCRIPT':
+                config['LOG_DIR_CURRENT_SCRIPT'] = value.strip()
+            elif key == 'LOG_LEVEL':
+                config['LOG_LEVEL'] = value.strip()
+            elif key == 'PERCENT_ERRORS':
+                try:
+                    config['PERCENT_ERRORS'] = int(value)
+                except ValueError:
+                    pass
+    logging.info(f'Слияние данных из файла с дефолтным конфигом выполнено: {config}')
+    return config
 
 
 def search_last_log_file(path, pattern):
     """
-        Поиск файла лога с последней датой
+        Поиск файла лога с наиболее свежей датой
         :param path: директория с файлами лога
         :param pattern:  одинаковая часть начала имени лога
         :return: namedtuple(name_file, create_date) - объект модуля collections
         """
-    log = logging.getLogger('app.log')
-    try:
-        log_list = os.listdir(path)
-    except FileNotFoundError:
+    if not os.path.exists(path):
+        logging.error('Директория с файлами лога не найдена')
         return False
-    last_file = None
-    for file in log_list[1:]:
-        date = re.search('\d{8}', file)[0]
-        if file.startswith(pattern) and (not last_file or last_file[1] < date):
-            last_file = file, date
 
-    if not last_file:
+    last_name = None
+    last_date = None
+    for file in os.listdir(path):
+        parsing_obj = re.search(pattern, file)
+        if not parsing_obj:
+            continue
+        if not last_name or last_date < parsing_obj['date']:
+            last_name, last_date = parsing_obj.group(), parsing_obj['date']
+    if not last_name:
+        logging.error('Не найден фаил лога для анализа')
         return False
-    log.info(f'Фаил лога для парсинга: {file}')
-    Data_file = namedtuple('Data_file', 'file date')
-    return Data_file(last_file[0], datetime.datetime.strptime(last_file[1], '%Y%m%d'))
+    logging.info(f'Имя лога для парсинга: {last_name}')
+    Data_file = namedtuple('Data_file', 'name date')
+    return Data_file(last_name, datetime.strptime(last_date, '%Y%m%d'))
 
 
-def read_log(name_file):
-    log = logging.getLogger('app.log')
-    total = 0
-    parsing_ok = 0
-    flag = False
-    log.info(f'Чтение файла лога')
-    if name_file.endswith('.gz'):
-        f = gzip.open(name_file, 'rb')
-        flag = True
-    else:
-        f = open(name_file)
-
-    for line in f:
-        if flag:
-            data_line = parsing_string_log(line.decode('utf-8').split('"'))
-        else:
-            data_line = parsing_string_log(line.split('"'))
-
-        total += 1
-        if data_line:
-            parsing_ok += 1
-            yield data_line
-    log.info(f'Выполнен парсинг {total} записей файла лога')
-    yield 'total', total
-    yield 'error', total - parsing_ok
-    f.close
-
-
-def parsing_string_log(string_lst):
+def read_log(name_file, pattern):
     """
-    Функция обрабатывает строку лога "string_lst" и добавляет url в список "report_lst"
-    :param string_lst: список созданный из строки
+    Чтение файла лога
+    :param name_file: имя файла
+    :return: url и время его обработки при удачном парсинге, иначе None
     """
-    log = logging.getLogger('app.log')
-    for el in string_lst:
-        if el.startswith('POST') or el.startswith('GET'):
-            data = el.split()[1], float(string_lst[-1])
-            return data
+    open_f = gzip.open if name_file.endswith('.gz') else open
+    logging.info(f'Чтение файла лога')
+    with open_f(name_file, 'rb') as f:
+        for line in f:
+            parser_line_obj = re.search(pattern, line.decode('utf-8'))
+            if parser_line_obj is None:
+                yield None
+            else:
+                yield parser_line_obj['url'], float(parser_line_obj['time'])
 
 
 def formation_report(parsed_lines, size, percent_error):
@@ -139,129 +123,101 @@ def formation_report(parsed_lines, size, percent_error):
     :param percent_error:
     :return: список словарей с статистическими данными по каждому URL
     """
-    log = logging.getLogger('app.log')
-    log.info(f'Формирование статистического отчета')
-    d = {}
+    dict_group_queries = defaultdict(list)
+    number_errors = 0
+    total_entries = 0
+    total_time = 0
     for line in parsed_lines:
-        if line[0] in d:
-            d[line[0]].append(line[1])
-        else:
-            d[line[0]] = [line[1], ]
+        total_entries += 1
+        if line is None:
+            number_errors += 1
+            continue
+        dict_group_queries[line[0]].append(line[1])
+        total_time += line[1]
 
-    total = d.pop('total')[0]
-    error = d.pop('error')[0]
-    if error / total > percent_error / 100:
-        log.error(f'Превышен допустимый процент ошибок парсинга -  {error * 100 / total}')
+    if number_errors / total_entries > percent_error / 100:
+        logging.error(f'Превышен допустимый процент ошибок парсинга -  {number_errors * 100 / total_entries}')
         return
 
-    report_lst = list(d.items())
-    total_time = sum([sum(s[1]) for s in report_lst])
-    del d
-
-    if len(report_lst) < size:
-        lst = sorted(report_lst, key=lambda report_lst: sum(report_lst[1]), reverse=True)
-    else:
-        lst = sorted(report_lst, key=lambda report_lst: sum(report_lst[1]), reverse=True)[:size]
-
-    del report_lst
     report = []
-    for url, time_lst in lst:
-        d = {}
-        d['url'] = url
-        d['count'] = round(len(time_lst), 3)
-        d['count_perc'] = round((d['count'] / total) * 100, 3)
-        d['time_sum'] = round(sum(time_lst), 3)
-        d['time_perc'] = round((sum(time_lst) / total_time) * 100, 3)
-        d['time_avg'] = round(sum(time_lst) / len(time_lst), 3)
-        d['time_max'] = round(max(time_lst), 3)
-        d['time_med'] = round(sorted(time_lst)[len(time_lst) // 2], 3)
-        report.append(d)
-    log.info(f'Отчет сформирован, количество записей - {len(report)} ')
-    del lst
+    for url, time_lst in sorted(dict_group_queries.items(), key=lambda k: sum(k[1]), reverse=True)[:size]:
+        count_requests = len(time_lst)
+        total_request_time = sum(time_lst)
+        report_field = {}
+        report_field['url'] = url
+        report_field['count'] = round(count_requests, 3)
+        report_field['count_perc'] = round((count_requests / total_entries) * 100, 3)
+        report_field['time_sum'] = round(total_request_time, 3)
+        report_field['time_perc'] = round((total_request_time / total_time) * 100, 3)
+        report_field['time_avg'] = round(total_request_time / count_requests, 3)
+        report_field['time_max'] = round(max(time_lst), 3)
+        report_field['time_med'] = round(sorted(time_lst)[count_requests // 2], 3)
+        report.append(report_field)
+
+    logging.info(f'Отчет сформирован, количество записей - {len(report)} ')
+    del dict_group_queries
     return report
 
 
-def write_to_file(report, path, date):
+def write_to_file(report, to, template):
     """
     Запись данных в html фаил
     :param report: данные
-    :param path: директория хранения отчетов
-    :param date: дата файла лога
+    :param to: имя отчета
+    :param template: шаблон отчета
     """
-    log = logging.getLogger('app.log')
-    name = os.path.join(path, f'report-{date.year}.{date.month}.{date.day}.html')
-    log.info(f'Запись отчета в фаил {name}')
-    if not os.path.exists(path):
-        os.makedirs(path)
-    with open('report.html') as f:
-        html = f.read()
-        log.info(f'Шаблон отчета получен')
-    with open(name, 'w') as f:
+    logging.info(f'Запись отчета в фаил {to}')
+    f = os.path.dirname(to)
+    if not os.path.exists(f):
+        os.makedirs(f)
+    with open(template) as temp, open(to, 'w') as f:
+        html = temp.read()
+        logging.info(f'Шаблон отчета получен')
         f.write(Template(html).safe_substitute(table_json=report))
-        log.info(f'Фаил шаблона создан - {name}')
+        logging.info(f'Фаил отчета создан - {to}')
 
 
 def main(config):
-    log.info('Запуск скрипта')
-    # чтение параметров командной строки
-    path_to_config = read_param_command_line()
+    logging.info('Запуск скрипта')
 
-    # перезапись словаря с конфигурацией
-    if path_to_config and not read_conf(path_to_config, config):
-        log.error(f'Файла конфигурации "{os.path.join(path_to_config, "config.conf")}" не существует')
-        sys.stderr.write('Фаил конфигурации не найден.')
-        sys.exit()
-
-    # получение данных о последнем файле лога
-    data_log = search_last_log_file(config['LOG_DIR'], 'nginx-access-ui.log')
-    if not data_log:
-        log.error(f'Фаил лога не найден')
-        sys.stdout.write('Фаил лога не найден')
+    # получение данных о самом свежем файле лога
+    data_file = search_last_log_file(config['LOG_DIR'], config['PATTERN_NAME_LOG'])
+    if not data_file:
         sys.exit()
 
     # если отчет существует - завершение скрипта
-    path = os.path.join(config['REPORT_DIR'], f'report-{data_log.date.year}.{data_log.date.month}.{data_log.date.day}.html')
-    if os.path.exists(path):
-        log.error(f'Фаил отчета существует: {path}')
-        sys.stdout.write('Отчет уже существует!')
+    file_report = os.path.join(config['REPORT_DIR'], f'report-{data_file.date.strftime("%Y.%m.%d")}.html')
+    if os.path.exists(file_report):
+        logging.error(f'Фаил отчета {file_report} уже существует')
         sys.exit()
 
-    # путь к файлу лога
-    path_to_file = os.path.join(config['LOG_DIR'], data_log.file)
+    # относительный путь к фаилу лога
+    log_file = os.path.join(config['LOG_DIR'], data_file.name)
 
     # Формирование сообщения
-    report = formation_report(read_log(path_to_file), config['REPORT_SIZE'], config["PERCENT_ERRORS"])
+    report = formation_report(read_log(log_file, config['PATTERN_RECORD_LOG']),
+                              config['REPORT_SIZE'],
+                              config["PERCENT_ERRORS"])
     if not report:
         sys.stdout.write('Превышено количество ошибок парсинга!')
         sys.exit()
 
+    # имя файла отчета
+    name_file_report = os.path.join(config['REPORT_DIR'], f'report-{data_file.date.strftime("%Y.%m.%d")}.html')
+
     # запись отчета в html фаил
-    write_to_file(report, config['REPORT_DIR'], data_log.date)
-
-
-def logger(config):
-    """
-    Создание объекта логирования
-    :param config: объект конфигурации
-    """
-    log = logging.getLogger('app.log')
-    _format = logging.Formatter(fmt='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
-
-    if 'LOG_DIR_CURRENT_SCRIPT' in config:
-        path_to_file = os.path.join(config['LOG_DIR_CURRENT_SCRIPT'], 'app.log')
-        if not os.path.exists(config['LOG_DIR_CURRENT_SCRIPT']):
-            os.makedirs(config['LOG_DIR_CURRENT_SCRIPT'])
-        f = logging.FileHandler(path_to_file, encoding='utf-8')
-        f.setFormatter(_format)
-    else:
-        f = logging.StreamHandler(sys.stdout)
-        f.setFormatter(_format)
-
-    log.addHandler(f)
-    log.setLevel(logging.INFO)
-    return log
+    write_to_file(report, name_file_report, config['TEMPLATE'])
 
 
 if __name__ == "__main__":
-    log = logger(config)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', dest='config', default=None)
+    args = parser.parse_args()
+
+    if not read_conf(args.config, config):
+        pass
+    logging.basicConfig(filename=config['LOG_DIR_CURRENT_SCRIPT'],
+                        level=getattr(logging, config['LOG_LEVEL']),
+                        format='[%(asctime)s] %(levelname).1s %(message)s',
+                        datefmt='%Y.%m.%d %H:%M:%S')
     main(config)
