@@ -10,8 +10,6 @@ import uuid
 import re
 from optparse import OptionParser
 from http.server import HTTPServer, BaseHTTPRequestHandler
-# from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
-from weakref import WeakKeyDictionary
 
 import scoring
 
@@ -41,167 +39,142 @@ GENDERS = {
 }
 
 
-class Field:
-    def __init__(self, required=True, nullable=True, field=None):
+class InvalidValue(Exception):
+    """ Ревалидное значение поля """
+
+
+class Field(abc.ABC):
+    def __init__(self, required=True, nullable=True):
         self.required = required  # True - обязательное поле
         self.nullable = nullable  # True - может быть пустым
-        self.field = field
-        self.data = WeakKeyDictionary()
 
-    def __get__(self, instance, owner):
-        return self.data.get(instance)
+    def __set_name__(self, owner, field):
+        self.field = field
 
     def __set__(self, instance, value):
         if value is None and self.required:
-            raise ValueError(f'Поле {self.field} обязательно, но значение не передано')
+            raise InvalidValue(f'Поле {self.field} обязательно, но значение не передано')
         if not value and not self.nullable:
-            raise ValueError(f'Значение поля {self.field} обязательно')
+            raise InvalidValue(f'Значение поля {self.field} обязательно')
+        value = self.validate(value)
+        instance.__dict__[self.field] = value
 
-    def __delete__(self, instance):
-        if self.nullable:
-            raise ValueError
+    @abc.abstractmethod
+    def validate(self, value):
+        """Возвращает проверенное значение или возбуждает исключение ValueError"""
 
 
 class CharField(Field):
-    def __init__(self, **kwargs):
-        super(CharField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(CharField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, str):
-            raise TypeError(f'Поле {self.field} должно быть строкой')
-        self.data[instance] = value
+            raise InvalidValue(f'Поле {self.field} должно быть строкой')
+        return value
 
 
 class ArgumentsField(Field):
-    def __init__(self, **kwargs):
-        super(ArgumentsField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(ArgumentsField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, dict):
-            raise ValueError(f'Поле {self.field} должно быть словарем')
-        self.data[instance] = value
+            raise InvalidValue(f'Поле {self.field} должно быть словарем')
+        return value
 
 
 class EmailField(CharField):
-    def __init__(self, **kwargs):
-        super(EmailField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(CharField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not re.match('\S+@\S.\S', value):
-            raise ValueError(f'Значение поля {self.field} должно быть email')
-        self.data[instance] = value
+            raise InvalidValue(f'Значение поля {self.field} должно быть email')
+        return value
 
 
 class PhoneField(Field):
-    def __init__(self, **kwargs):
-        super(PhoneField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(PhoneField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, (str, int)):
-            raise TypeError(f'Значение поля {self.field} должно быть строкой или числом')
+            raise InvalidValue(f'Значение поля {self.field} должно быть строкой или числом')
         if value and not re.match('^7\d{10}$', str(value)):
-            raise ValueError(f'Значение поля {self.field} должно быть одинадцатизначное число начинающееся с 7')
-        self.data[instance] = value
+            raise InvalidValue(f'Значение поля {self.field} должно быть одинадцатизначное число начинающееся с 7')
+        return value
 
 
 class DateField(Field):
-    def __init__(self, **kwargs):
-        super(DateField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(DateField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, str):
-            raise TypeError(f'Значение поля {self.field} должно быть строкой')
+            raise InvalidValue(f'Значение поля {self.field} должно быть строкой')
         if value and not re.match('^(0[1-9]|[1,2][0-9]|3[0,1])\.(0[1-9]|1[0-2])\.\d{4}$', value):
-            raise ValueError(f'Значение поля {self.field} должно быть в формате "ДД.ММ.ГГГГ"')
-        self.data[instance] = value
+            raise InvalidValue(f'Значение поля {self.field} должно быть в формате "ДД.ММ.ГГГГ"')
+        return value
 
 
-class BirthDayField(DateField):
-    def __init__(self, **kwargs):
-        super(BirthDayField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(BirthDayField, self).__set__(instance, value)
+class BirthDayField(Field):
+    def validate(self, value):
+        if value and not isinstance(value, str):
+            raise InvalidValue(f'Значение поля {self.field} должно быть строкой')
         if value and not re.match('^(0[1-9]|[1,2][0-9]|3[0,1])\.(0[1-9]|1[0-2])\.(19[5-9][0-9]|20[0-1][0-9]|2020)$', value):
-            raise ValueError(f'Значение года в поле {self.field} должен быть не менее 1950')
-        self.data[instance] = value
+            raise InvalidValue(f'Значение года в поле {self.field} должен быть не менее 1950')
+        return value
 
 
 class GenderField(Field):
-    def __init__(self, **kwargs):
-        super(GenderField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(GenderField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, int):
-            raise TypeError(f'Значение поля {self.field} должно быть числом')
+            raise InvalidValue(f'Значение поля {self.field} должно быть числом')
         if value and value not in [UNKNOWN, MALE, FEMALE]:
-            raise ValueError(f'Значение поля {self.field} должно быть числом: {UNKNOWN}, {MALE}, {FEMALE}')
-        self.data[instance] = value
+            raise InvalidValue(f'Значение поля {self.field} должно быть числом: {UNKNOWN}, {MALE}, {FEMALE}')
+        return value
 
 
 class ClientIDsField(Field):
-    def __init__(self, **kwargs):
-        super(ClientIDsField, self).__init__(**kwargs)
-
-    def __set__(self, instance, value):
-        super(ClientIDsField, self).__set__(instance, value)
+    def validate(self, value):
         if value and not isinstance(value, (list, tuple)):
-            raise ValueError(f'Поле {self.field} должно быть последовательностью')
+            raise InvalidValue(f'Поле {self.field} должно быть последовательностью')
         if not all(isinstance(i, int) for i in value):
-            raise ValueError(f'Элементы поля {self.field} должны быть числами')
-        self.data[instance] = value
+            raise InvalidValue(f'Элементы поля {self.field} должны быть числами')
+        return value
 
 
-class ClientsInterestsRequest:
-    client_ids = ClientIDsField(required=True, nullable=False, field='client_ids')
-    date = DateField(required=False, nullable=True, field='date')
+class ClientMeta(type):
+    def __new__(mcs, name, bases, attr_dict):
+        fields = []
+        for key, value in attr_dict.items():
+            if isinstance(value, property):
+                continue
+            if key.startswith('__'):
+                continue
+            if hasattr(value, '__call__'):
+                continue
+            fields.append(key)
+        attr_dict['fields'] = fields
+        return super(ClientMeta, mcs).__new__(mcs, name, bases, attr_dict)
+
+
+class ClientsInterestsRequest(metaclass=ClientMeta):
+    client_ids = ClientIDsField(required=True, nullable=False)
+    date = DateField(required=False, nullable=True)
 
     def __init__(self, **kwargs):
-        self.client_ids = kwargs.pop('client_ids', None)
-        self.date = kwargs.pop('date', None)
+        for field in self.fields:
+            setattr(self, field, kwargs.pop(field, None))
 
     def get_context(self):
         return len(self.client_ids)
-        # return {'nclients': len(self.client_ids)}
 
 
-class OnlineScoreRequest:
-    first_name = CharField(required=False, nullable=True, field='first_name')
-    last_name = CharField(required=False, nullable=True, field='last_name')
-    email = EmailField(required=False, nullable=True, field='email')
-    phone = PhoneField(required=False, nullable=True, field='phone')
-    birthday = BirthDayField(required=False, nullable=True, field='birthday')
-    gender = GenderField(required=False, nullable=True, field='gender')
+class OnlineScoreRequest(metaclass=ClientMeta):
+    first_name = CharField(required=False, nullable=True)
+    last_name = CharField(required=False, nullable=True)
+    email = EmailField(required=False, nullable=True)
+    phone = PhoneField(required=False, nullable=True)
+    birthday = BirthDayField(required=False, nullable=True)
+    gender = GenderField(required=False, nullable=True)
 
     def __init__(self, store, **kwargs):
         self.store = store
-        self.first_name = kwargs.pop('first_name', None)
-        self.last_name = kwargs.pop('last_name', None)
-        self.email = kwargs.pop('email', None)
-        self.phone = kwargs.pop('phone', None)
-        self.birthday = kwargs.pop('birthday', None)
-        self.gender = kwargs.pop('gender', None)
+        for field in self.fields:
+            setattr(self, field, kwargs.pop(field, None))
 
     def get_context(self):
         context = []
-        if not self.first_name is None:
-            context.append('first_name')
-        if not self.last_name is None:
-            context.append('last_name')
-        if not self.email is None:
-            context.append('email')
-        if not self.phone is None:
-            context.append('phone')
-        if not self.birthday is None:
-            context.append('birthday')
-        if not self.gender is None:
-            context.append('gender')
+        for field in self.fields:
+            if getattr(self, field, None) is not None:
+                context.append(field)
         return context
 
     def validation_field_request(self):
@@ -212,13 +185,13 @@ class OnlineScoreRequest:
         elif not (self.gender is None or self.birthday is None):
             return
         else:
-            raise ValueError('Необходимо передать минимум два поля: phone и email, first_name и last_name, gender и birthday')
+            raise InvalidValue('Необходимо передать минимум два поля: phone и email, first_name и last_name, gender и birthday')
 
     def get_scoring(self):
-        return scoring.get_score(self.store, self.phone, self.email, self.birthday, self.gender, self.first_name, self.last_name)
+        return scoring.get_score(self.store, *[getattr(self, field, None) for field in self.fields])
 
 
-class MethodRequest:
+class MethodRequest(metaclass=ClientMeta):
     account = CharField(required=False, nullable=True)
     login = CharField(required=True, nullable=True)
     token = CharField(required=True, nullable=True)
@@ -226,11 +199,8 @@ class MethodRequest:
     method = CharField(required=True, nullable=False)
 
     def __init__(self, **kwargs):
-        self.account = kwargs.pop('account', None)
-        self.login = kwargs.pop('login', None)
-        self.token = kwargs.pop('token', None)
-        self.arguments = kwargs.pop('arguments', None)
-        self.method = kwargs.pop('method', None)
+        for field in self.fields:
+            setattr(self, field, kwargs.pop(field, None))
 
     @property
     def is_admin(self):
@@ -247,41 +217,46 @@ def check_auth(request):
     return False
 
 
+def method_handler_online_score(obj_request, request, ctx, store):
+    try:
+        logging.info('argument validation online_score method')
+        response = OnlineScoreRequest(store, **request['body']['arguments'])
+        response.validation_field_request()
+        ctx['has'] = response.get_context()
+        score = 42 if obj_request.is_admin else response.get_scoring()
+        return {'code': OK, 'score': score}, OK
+    except (TypeError, ValueError, InvalidValue) as e:
+        logging.exception("INVALID_REQUEST - ClientsInterestsRequest %s" % e)
+        return str(e), INVALID_REQUEST
+
+
+def method_handler_clients_interests(obj_request, request, ctx, store):
+    try:
+        logging.info('argument validation clients_interests method')
+        response = ClientsInterestsRequest(**request['body']['arguments'])
+        ctx['nclients'] = response.get_context()
+        return {key: scoring.get_interests(store, key) for key in response.client_ids}, OK
+    except (TypeError, ValueError, InvalidValue) as e:
+        logging.exception("INVALID_REQUEST - ClientsInterestsRequest %s" % e)
+        return str(e), INVALID_REQUEST
+
+
 def method_handler(request, ctx, store=None):
     try:
         logging.info('Request validation')
         obj_request = MethodRequest(**request['body'])
-    except (TypeError, ValueError, AttributeError) as e:
+    except (TypeError, ValueError, AttributeError, InvalidValue) as e:
         logging.exception("INVALID_REQUEST - MethodRequest %s" % e)
-        return {'code': INVALID_REQUEST, 'error': str(e)}, INVALID_REQUEST
-
+        return str(e), INVALID_REQUEST
     if not check_auth(obj_request):
         logging.error('Authentication failed')
-        return {'code': FORBIDDEN, 'error': ERRORS[FORBIDDEN]}, FORBIDDEN
+        return ERRORS[FORBIDDEN], FORBIDDEN
 
     if obj_request.method == 'online_score':
-        try:
-            logging.info('argument validation online_score method')
-            response = OnlineScoreRequest(store, **request['body']['arguments'])
-            response.validation_field_request()
-            ctx['has'] = response.get_context()
-            if obj_request.is_admin:
-                return {'code': OK, 'score': 42}, OK
-            else:
-                return {'code': OK, 'score': response.get_scoring()}, OK
-        except (TypeError, ValueError) as e:
-            logging.exception("INVALID_REQUEST - OnlineScoreRequest %s" % e)
-            return {'code': INVALID_REQUEST, 'error': str(e)}, INVALID_REQUEST
+        return method_handler_online_score(obj_request, request, ctx, store)
 
     if obj_request.method == 'clients_interests':
-        try:
-            logging.info('argument validation clients_interests method')
-            response = ClientsInterestsRequest(**request['body']['arguments'])
-            ctx['nclients'] = response.get_context()
-            return {key: scoring.get_interests(store, key) for key in response.client_ids}, OK
-        except (TypeError, ValueError) as e:
-            logging.exception("INVALID_REQUEST - ClientsInterestsRequest %s" % e)
-            return {'code': INVALID_REQUEST, 'error': str(e)}, INVALID_REQUEST
+        return method_handler_clients_interests(obj_request, request, ctx, store)
 
 
 class MainHTTPHandler(BaseHTTPRequestHandler):
@@ -310,6 +285,7 @@ class MainHTTPHandler(BaseHTTPRequestHandler):
             if path in self.router:
                 try:
                     response, code = self.router[path]({"body": request, "headers": self.headers}, context, self.store)
+                    print(response, code)
                 except Exception as e:
                     logging.exception(f"Unexpected error: {e}")
                     code = INTERNAL_ERROR
